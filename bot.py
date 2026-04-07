@@ -2,12 +2,11 @@ import asyncio
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot, InputFile
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import io
-import sys
 import logging
 from typing import Dict, Optional
 import json
@@ -16,9 +15,9 @@ import os
 # ------------------------------
 # CONFIGURATION
 # ------------------------------
-TELEGRAM_BOT_TOKEN = "8518401386:AAF7EI3b9VsK9uOzlYQD0btgUQ-MKkSbxY0"
-TELEGRAM_CHANNEL_ID = "-1003564816977"  # CHANGE THIS
-HEARTBEAT_INTERVAL = 3600  # 1 hour
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8518401386:AAF7EI3b9VsK9uOzlYQD0btgUQ-MKkSbxY0")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@your_channel_username")
+HEARTBEAT_INTERVAL = 3600
 SIGNAL_COOLDOWN_HOURS = 4
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,16 +37,13 @@ class BTCSignalBot:
         self.last_signal_time = None
         
     def fetch_ohlcv(self, timeframe: str, limit: int = 200) -> pd.DataFrame:
-        """Fetch BTC data using Yahoo Finance with correct parameters"""
+        """Fetch BTC data using Yahoo Finance"""
         try:
             ticker = yf.Ticker("BTC-USD")
             
-            # Use predefined periods for yfinance
             if timeframe == "15m":
-                # For 15m, get last 3 days of 5m data and resample
                 df = ticker.history(period="3d", interval="5m")
                 if not df.empty:
-                    # Use 'h' instead of 'H' for hours (case-sensitive)
                     df = df.resample('15min').agg({
                         'Open': 'first',
                         'High': 'max',
@@ -58,10 +54,8 @@ class BTCSignalBot:
                     df = df.tail(limit)
                     
             elif timeframe == "1h":
-                # For 1h, get last 7 days of 15m data and resample
                 df = ticker.history(period="7d", interval="15m")
                 if not df.empty:
-                    # Use 'h' instead of 'H'
                     df = df.resample('1h').agg({
                         'Open': 'first',
                         'High': 'max',
@@ -72,10 +66,8 @@ class BTCSignalBot:
                     df = df.tail(limit)
                     
             elif timeframe == "4h":
-                # For 4h, get last 30 days of 1h data
                 df = ticker.history(period="30d", interval="60m")
                 if not df.empty:
-                    # Use 'h' instead of 'H'
                     df = df.resample('4h').agg({
                         'Open': 'first',
                         'High': 'max',
@@ -86,7 +78,6 @@ class BTCSignalBot:
                     df = df.tail(limit)
                     
             elif timeframe == "1d":
-                # Daily data is straightforward
                 df = ticker.history(period=f"{limit}d", interval="1d")
                 
             else:
@@ -95,10 +86,8 @@ class BTCSignalBot:
             if df.empty:
                 raise Exception(f"No data received for {timeframe}")
             
-            # Rename columns to lowercase
             df.columns = [col.lower() for col in df.columns]
             
-            # Ensure we have all required columns
             required_cols = ['open', 'high', 'low', 'close', 'volume']
             for col in required_cols:
                 if col not in df.columns:
@@ -121,10 +110,8 @@ class BTCSignalBot:
                 df = self.fetch_ohlcv(tf)
                 
                 if len(df) < 20:
-                    logger.warning(f"Not enough data for {tf}, skipping")
                     continue
                 
-                # Calculate indicators
                 results[tf] = {
                     "current_price": df['close'].iloc[-1],
                     "trend": "bullish" if df['close'].iloc[-1] > df['close'].iloc[-20:].mean() else "bearish",
@@ -135,7 +122,6 @@ class BTCSignalBot:
                     "liquidity_grab": self.detect_liquidity_grab(df)
                 }
                 
-                # Add EMA for 15m
                 if tf == "15m":
                     results[tf]["ema_fast"] = df['close'].ewm(span=9, adjust=False).mean().iloc[-1]
                     results[tf]["ema_slow"] = df['close'].ewm(span=21, adjust=False).mean().iloc[-1]
@@ -147,15 +133,13 @@ class BTCSignalBot:
                 continue
         
         if not results:
-            raise Exception("No timeframe data available - check internet connection")
+            raise Exception("No timeframe data available")
             
         return results
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> float:
-        """Calculate RSI"""
         if len(prices) < period + 1:
             return 50
-            
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -165,14 +149,12 @@ class BTCSignalBot:
         return result if not pd.isna(result) else 50
     
     def detect_liquidity_grab(self, df: pd.DataFrame) -> bool:
-        """Detect liquidity grab"""
         if len(df) < 10:
             return False
         recent_low = df['low'].iloc[-10:-1].min()
         return df['low'].iloc[-1] < recent_low and df['close'].iloc[-1] > df['open'].iloc[-1]
     
     def generate_signal(self, analysis: Dict) -> Optional[Dict]:
-        """Generate trading signal"""
         if not analysis:
             return None
             
@@ -207,8 +189,7 @@ class BTCSignalBot:
                 else:
                     bearish_signals += 1
         
-        # Use 15m or 1d price for entry (since 1h/4h might be missing)
-        current_price = analysis.get('15m', analysis.get('1d', {})).get('current_price', 0)
+        current_price = analysis.get('15m', analysis.get('1h', {})).get('current_price', 0)
         if current_price == 0:
             return None
         
@@ -240,7 +221,6 @@ class BTCSignalBot:
         return None
     
     def generate_reasoning(self, analysis: Dict, direction: str) -> str:
-        """Generate reasoning for signal"""
         reasons = []
         for tf, data in analysis.items():
             if data['trend'] == direction.lower():
@@ -252,15 +232,9 @@ class BTCSignalBot:
             if tf == "15m" and 'ema_fast' in data and 'ema_slow' in data:
                 if direction == "LONG" and data['ema_fast'] > data['ema_slow']:
                     reasons.append(f"⚡ 15m EMA bullish cross")
-            if data['rsi'] < 35 and direction == "LONG":
-                reasons.append(f"📉 {tf.upper()} RSI oversold ({data['rsi']:.1f})")
-            elif data['rsi'] > 65 and direction == "SHORT":
-                reasons.append(f"📈 {tf.upper()} RSI overbought ({data['rsi']:.1f})")
-                
         return "\n".join(reasons[:5]) if reasons else "Technical confluence detected"
     
     async def create_chart_image(self, analysis: Dict) -> io.BytesIO:
-        """Generate chart"""
         try:
             df = self.fetch_ohlcv("15m", limit=100)
             
@@ -275,7 +249,6 @@ class BTCSignalBot:
                 mpf.make_addplot([resistance] * len(df), color='red', linestyle='--', width=0.8, alpha=0.7),
             ]
             
-            # Add EMA for 15m
             if len(df) > 21:
                 ema21 = df['close'].ewm(span=21, adjust=False).mean()
                 apds.append(mpf.make_addplot(ema21, color='orange', width=0.8, alpha=0.5))
@@ -295,7 +268,6 @@ class BTCSignalBot:
             return io.BytesIO()
     
     async def send_signal(self, signal: Dict):
-        """Send signal to Telegram"""
         signal_id = f"{signal['type']}_{signal['entry']}_{datetime.now().strftime('%Y-%m-%d')}"
         if signal_id in sent_trades:
             logger.info(f"Duplicate prevented: {signal_id}")
@@ -344,28 +316,23 @@ class BTCSignalBot:
             logger.error(f"Failed to send signal: {e}")
     
     async def get_analysis_async(self):
-        """Run analysis in thread pool"""
         return await asyncio.get_event_loop().run_in_executor(None, self.multi_timeframe_analysis)
     
     async def send_startup_message(self):
-        """Send startup message"""
         message = f"""
 🤖 **BTC Signal Bot ONLINE** 🟢
 
 📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 📊 **Strategy:** Smart Money + Multi-Timeframe
-⏱️ **Timeframes:** 15m, 1d (1h/4h coming soon)
+⏱️ **Timeframes:** 15m, 1h, 4h, 1d
 📈 **Data Source:** Yahoo Finance
 
 ✅ Bot is live and monitoring BTC!
-
-_Waiting for first signal..._
         """
         await self.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
         logger.info("Startup message sent")
     
     async def send_heartbeat(self):
-        """Send heartbeat"""
         if (datetime.now() - self.last_heartbeat).total_seconds() >= HEARTBEAT_INTERVAL:
             try:
                 analysis = await self.get_analysis_async()
@@ -380,8 +347,6 @@ _Waiting for first signal..._
 💰 BTC Price: ${price:,.0f}
 📈 15M Trend: {trend.upper()}
 📊 Last Signal: {self.last_signal_time.strftime('%H:%M UTC') if self.last_signal_time else 'None yet'}
-
-_Still monitoring for Smart Money setups..._
                 """
                 await self.bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
                 self.last_heartbeat = datetime.now()
@@ -390,7 +355,6 @@ _Still monitoring for Smart Money setups..._
                 logger.error(f"Heartbeat failed: {e}")
     
     async def run_analysis_loop(self):
-        """Main loop"""
         logger.info("Starting BTC signal bot...")
         await self.send_startup_message()
         
@@ -422,15 +386,3 @@ _Still monitoring for Smart Money setups..._
             except Exception as e:
                 logger.error(f"Loop error: {e}")
                 await asyncio.sleep(60)
-
-async def main():
-    bot = BTCSignalBot()
-    try:
-        await bot.run_analysis_loop()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
